@@ -17,7 +17,12 @@ This document does not ship production-ready rules. It enumerates the telemetry 
 | Persistence | None | None |
 | Network | None | None |
 
-Both tools map to MITRE ATT&CK techniques **T1552.001** (Unsecured Credentials: Credentials In Files), **T1555.003** (relocated from web browsers to AI conversation stores), **T1005** (Data from Local System), and, for the BOF's ChatGPT path, **T1140** (Deobfuscate/Decode Files).
+MITRE ATT&CK mapping:
+
+- [**T1552.001**](https://attack.mitre.org/techniques/T1552/001/) — Unsecured Credentials: Credentials In Files. Primary technique for both tools; credentials live in plaintext (or DPAPI-wrapped) files that the tool reads as files.
+- [**T1005**](https://attack.mitre.org/techniques/T1005/) — Data from Local System. Covers the file-walk and bulk-read behavior across multiple AI tool stores.
+- [**T1140**](https://attack.mitre.org/techniques/T1140/) — Deobfuscate/Decode Files or Information. Applies to the BOF's ChatGPT path: DPAPI unwrap of the encrypted key followed by AES-256-GCM decryption of conversation files.
+- [**T1555**](https://attack.mitre.org/techniques/T1555/) — Credentials from Password Stores (parent technique, no subtechnique). Defensible for the ChatGPT/Electron path specifically, where the `encrypted_key` field in `Local State` is a DPAPI-protected Chromium Safe Storage key — that is a password-store-style protected secret. Not applicable to Claude Code, Cursor, or Codex paths.
 
 ## Telemetry Surfaces (Windows)
 
@@ -32,9 +37,9 @@ Legitimate readers of the target paths:
 
 Anything else reading these files is suspect. The detection idea is a `DeviceFileEvents` baseline that lists the allowed `InitiatingProcessFileName` per target path and surfaces all violations. False positives: backup agents (OneDrive sync, enterprise backup), Defender / EDR scanners themselves, DLP agents. Tune by trusting their signed publisher fields rather than the process name.
 
-The BOF's DLL loading pattern is also distinctive. `winsqlite3.dll` is system-provided but loaded by very few processes; combined with `crypt32.dll` and `bcrypt.dll` resolved via `LoadLibraryA` from a process that isn't browser, IDE, or known DB tooling, the combination is rare. `DeviceImageLoadEvents` joined to `DeviceFileEvents` within a small time window yields a strong correlation signal. The BOF also calls `GetTempFileNameW` and writes a SQLite copy to `%TEMP%` before opening — a temp-file create whose contents match SQLite magic bytes (`SQLite format 3\0`) under a non-SQLite-using process is a clean indicator.
+The BOF's DLL loading pattern is also distinctive. `winsqlite3.dll` is explicitly loaded by the BOF via `LoadLibraryA` (ghosttype.c:417) and is loaded by very few processes overall. `crypt32.dll` and `bcrypt.dll` are not loaded by the BOF directly; they are resolved by the C2 framework's COFF loader as `LIBRARY$Function` Dynamic Function Resolution imports, which internally results in `LoadLibraryA` calls from the beacon process. The image-load events look the same from the defender's perspective regardless of which layer issued the call. The combination of `winsqlite3` plus `crypt32` plus `bcrypt` loaded into a process that isn't a browser, IDE, or known DB tool is rare. `DeviceImageLoadEvents` joined to `DeviceFileEvents` within a small time window yields a strong correlation signal. The BOF also calls `GetTempFileNameW` with prefix `gt` and `CopyFileW` to clone SQLite databases into `%TEMP%` before opening them — a temp-file create whose contents match SQLite magic bytes (`SQLite format 3\0`) under a non-SQLite-using process is a clean indicator.
 
-DPAPI usage is auditable when subcategory `Other System Events` (or DPAPI-specific ETW providers) are enabled. Event 4693 fires on `CryptUnprotectData` for keys that the user originally protected; correlated with file reads of `conversations-v3-*` it is a high-confidence chain. Most environments leave DPAPI auditing off by default — flag this as a hardening prerequisite, not a default-on signal.
+DPAPI activity is not audited by default and is not reliably captured by the Security event log. Event ID `4693` covers DPAPI master-key recovery (e.g., backup operations), not application-level `CryptUnprotectData` calls. Event ID `4695` only fires when the protected blob carries the `CRYPTPROTECT_AUDIT` flag, which Chromium and Electron do not set, so ChatGPT decryption emits no `4695` either. Practical visibility requires ETW (`Microsoft-Windows-Crypto-DPAPI` provider, events such as `DPAPIDefInformationEvent` 8193 and 8194) or an EDR that hooks the crypt APIs (Defender for Endpoint surfaces this in some advanced-hunting columns). Treat DPAPI as a confirmation-layer signal, not a frontline detection.
 
 ## Telemetry Surfaces (macOS)
 
@@ -49,7 +54,7 @@ Several runtime signatures distinguish a credential sweep from incidental file a
 - One process reading from **two or more** of {Claude Code, Cursor, Codex, ChatGPT} paths within a short window (e.g., 60 seconds). Legitimate apps read only their own store.
 - Recursive directory walks under `\.claude\projects\` or `Cursor\User\workspaceStorage\` from a process that does not own those directories.
 - A SQLite-shaped file appearing in `%TEMP%` followed by a read on it from the process that created it (the BOF's copy-then-open pattern).
-- A non-Electron process performing `CryptUnprotectData` on bytes that begin with `v10` or `v11` (ChatGPT Safe Storage prefix).
+- A non-Electron process performing `CryptUnprotectData` on a small blob extracted from `Local State` (the DPAPI-wrapped `encrypted_key` value, prefixed with the 5-byte `DPAPI` tag), **followed by** a `BCryptDecrypt` call against `v10`/`v11`-prefixed bytes (the AES-256-GCM ciphertext from `conversations-v3-*\*.data`). The two-step chain inside one process is the high-fidelity ChatGPT decryption fingerprint.
 
 ## Honeytoken Strategy
 
@@ -76,7 +81,7 @@ A repackaged single-file build (PyInstaller, Nuitka) hides the Python parent but
 
 These are the gaps an operator can exploit. Defenders should weight rules accordingly and prefer telemetry that survives the listed bypasses.
 
-- **DLL load obfuscation.** The BOF resolves `winsqlite3`, `crypt32`, and `bcrypt` via `LoadLibraryA`/`GetProcAddress`, which surfaces in image-load telemetry. An operator can walk the PEB to find an already-loaded copy, or implement a manual loader to skip `LoadLibraryA` entirely. Image-load signals will silently disappear; file-read signals remain.
+- **DLL load obfuscation.** Only `winsqlite3.dll` is loaded directly by the BOF via `LoadLibraryA`; `crypt32.dll` and `bcrypt.dll` are resolved by the C2 framework's COFF loader through the `LIBRARY$Function` DFR mechanism. An operator can replace the explicit `LoadLibraryA("winsqlite3.dll")` with a PEB walk to find an already-loaded copy, or implement a manual loader; the framework-resolved DFR imports are tied to the C2 framework's loader and not directly changeable by the BOF author without forking the framework or switching to a different loader. Either way, the resulting image-load events look identical to defenders, so partial bypass (just `winsqlite3`) leaves the `crypt32` + `bcrypt` pair visible. File-read signals remain in all cases.
 - **Process distribution.** The "one process reads multiple AI stores" correlation breaks if the operator splits work across separate beacons or schedules the scans minutes or hours apart. A time-window correlation rule on a host (rather than a process) is more durable.
 - **Direct NTFS reads.** The temp-file pattern collapses if the operator reads the SQLite databases directly without the copy step (best-effort; locks may block this for in-use Cursor / Codex stores). The Cursor and Codex databases are sometimes locked while the app is running, which is why the copy step exists; under that constraint, the temp file is unavoidable for the BOF.
 - **Offline decryption.** A more careful BOF would skip the DPAPI / BCrypt calls entirely and exfiltrate the encrypted `conversations-v3-*` bytes plus the user's DPAPI master key for offline decryption on the operator host. This removes the strongest crypto-API correlation signal. Detect on the master-key exfil instead (read of `%APPDATA%\Microsoft\Protect\<SID>\*`).
@@ -92,7 +97,7 @@ In rough priority order by signal-to-noise:
 2. Honeytoken canary in the conversation stores; any read of a canary value is a confirmed scan
 3. Image-load rule for `winsqlite3.dll` outside an allowlist of expected processes
 4. Temp-file create of SQLite-magic content under a non-SQLite-using process
-5. DPAPI auditing on `conversations-v3-*` decryption (requires audit policy enabled)
+5. ETW `Microsoft-Windows-Crypto-DPAPI` events correlated with `BCryptDecrypt` (AES-GCM) on `v10`/`v11`-prefixed bytes, confined to the same process and short time window (requires ETW collection; Security event log alone is not sufficient)
 6. Cross-store correlation: same process or same host reading two or more AI tool stores within 60 seconds
 7. DLP rule on `ghosttype_report/` directory creation (catches the original tool, not the BOF)
 
