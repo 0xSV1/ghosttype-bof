@@ -85,15 +85,19 @@ A repackaged single-file build (PyInstaller, Nuitka) hides the Python parent but
 
 ## Known Evasion Paths
 
-These are the gaps an operator can exploit. Defenders should weight rules accordingly and prefer telemetry that survives the listed bypasses.
+Every detection in the preceding sections can be eroded by a careful operator. The question worth asking for each one is not whether it can be bypassed but how much work the bypass costs and which signals survive.
 
-- **DLL load obfuscation.** Only `winsqlite3.dll` is loaded directly by the BOF via `LoadLibraryA`; `crypt32.dll` and `bcrypt.dll` are resolved by the C2 framework's COFF loader through the `LIBRARY$Function` DFR mechanism. An operator can replace the explicit `LoadLibraryA("winsqlite3.dll")` with a PEB walk to find an already-loaded copy, or implement a manual loader; the framework-resolved DFR imports are tied to the C2 framework's loader and not directly changeable by the BOF author without forking the framework or switching to a different loader. Either way, the resulting image-load events look identical to defenders, so partial bypass (just `winsqlite3`) leaves the `crypt32` + `bcrypt` pair visible. File-read signals remain in all cases.
-- **Process distribution.** The "one process reads multiple AI stores" correlation breaks if the operator splits work across separate beacons or schedules the scans minutes or hours apart. A time-window correlation rule on a host (rather than a process) is more durable.
-- **Direct NTFS reads.** The temp-file pattern collapses if the operator reads the SQLite databases directly without the copy step (best-effort; locks may block this for in-use Cursor / Codex stores). The Cursor and Codex databases are sometimes locked while the app is running, which is why the copy step exists; under that constraint, the temp file is unavoidable for the BOF.
-- **Offline decryption.** A more careful BOF would skip the DPAPI / BCrypt calls entirely and exfiltrate the encrypted `conversations-v3-*` bytes plus the user's DPAPI master key for offline decryption on the operator host. This removes the strongest crypto-API correlation signal. Detect on the master-key exfil instead (read of `%APPDATA%\Microsoft\Protect\<SID>\*`).
-- **Path obfuscation.** Hardcoded environment variable lookups (`USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) are visible in static analysis but not in runtime telemetry. There is no on-the-wire artifact to obfuscate; the actual file paths must still appear in `CreateFileW` calls, which is what file-event telemetry sees.
-- **AMSI / ETW-TI.** BOFs do not load .NET or PowerShell, so AMSI is not engaged. ETW-TI events fire on the beacon's parent process injection, not on the BOF itself — useful for catching the initial implant, not the credential sweep specifically.
-- **Output redaction.** The BOF and the original tool both support `--redact` / `i:1`. A redacted run still emits the same file-read telemetry; the redaction only affects what the operator sees, not what the defender observes.
+The DLL-load signal is the easiest to chip away at. Only `winsqlite3.dll` is loaded directly by the BOF, so an operator who walks the PEB for an already-loaded copy, or who substitutes a manual loader, removes that single image-load event. The `crypt32.dll` and `bcrypt.dll` loads ride on the C2 framework's COFF loader through its `LIBRARY$Function` DFR mechanism and cannot be removed without forking the framework. Partial bypass therefore still leaves the `crypt32` plus `bcrypt` pair visible, and the file-read events remain regardless.
+
+The "one process touches multiple AI stores" correlation falls apart when the operator splits work across separate beacons or staggers scans by minutes or hours. A correlation scoped to the host rather than a single process holds up better against that pattern.
+
+The temp-file indicator is more durable than it looks because the BOF's copy step is not optional. Cursor and Codex keep their SQLite databases locked while the apps are running, which is why the copy exists. An operator could attempt a direct volume read to skip `%TEMP%`, but contended locks defeat that under live conditions on most workstations.
+
+The crypto-API chain can be removed wholesale by a more careful BOF that skips DPAPI and BCrypt on-host and exfiltrates the encrypted `conversations-v3-*` bytes together with the user's DPAPI master key for offline decryption on the operator's machine. When that happens, the strongest signal shifts to master-key access itself: a read of `%APPDATA%\Microsoft\Protect\<SID>\*` from a non-system process is rare and high-fidelity in any environment.
+
+A handful of things don't move. Hardcoded environment variable lookups (`USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) hide nothing at runtime because the resolved paths still flow through `CreateFileW`, which file-event telemetry captures unconditionally. `--redact` and `i:1` only change what the operator sees in their output, not what the defender observes on the box. AMSI is not engaged because no .NET or PowerShell is involved, and ETW-TI fires on the beacon's parent injection rather than on the BOF, so it catches the implant rather than the sweep.
+
+In short, file-read events, the `%APPDATA%\Microsoft\Protect` master-key access path, and the SQLite-shaped temp-file artifact are the three signals that resist nearly every bypass available to an operator working within the BOF model.
 
 ## Suggested Detection Stack
 
