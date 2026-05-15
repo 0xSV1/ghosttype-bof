@@ -1,0 +1,39 @@
+# Build artifacts
+*.o
+*.obj
+*.exe
+*.dll
+*.pdb
+*.ilk
+
+# Editor / IDE
+.vscode/
+.idea/
+.cursor/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+.AppleDouble
+
+# ghosttype scan output (original project entry, kept just in case someone outputs that here)
+ghosttype_report/
+*.findings.json
+*.findings.csv
+sources/
+
+# Secrets / credentials
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+auth.json
+credentials.json
