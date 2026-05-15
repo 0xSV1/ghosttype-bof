@@ -105,6 +105,10 @@ Severity levels: `critical` (AWS keys, Anthropic keys, GitHub PATs, Stripe live 
 - No registry writes, no named pipes, no service creation
 - Synchronous execution: blocks the agent thread until complete (typically a few seconds)
 
+## Detection
+
+See [DETECTION.md](DETECTION.md) for concept-level detection notes covering both this BOF and the original Python tool, with telemetry surfaces, honeytoken strategy, and known evasion paths.
+
 ## Credit
 
 Based on [ghosttype](https://github.com/xFreed0m/ghosttype) by xFreed0m.
