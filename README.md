@@ -2,7 +2,7 @@
 
 Portable Beacon Object File that scans AI coding tool conversation histories on Windows for exposed credentials.
 
-Compatible with any COFF-loader C2 framework: Cobalt Strike, Sliver, Havoc, Mythic, Brute Ratel, Fenrir, etc. Uses only the standard Beacon API surface (`BeaconDataParse`, `BeaconDataInt`, `BeaconPrintf`) and DFR conventions (`MODULE$Function`).
+Compatible with any COFF-loader C2 framework: Cobalt Strike, Sliver, Havoc, Mythic, Brute Ratel, etc. Uses only the standard Beacon API surface (`BeaconDataParse`, `BeaconDataInt`, `BeaconPrintf`) and DFR conventions (`MODULE$Function`).
 
 ## Supported Tools
 
@@ -30,7 +30,7 @@ Requires MinGW cross-compiler targeting x86_64 Windows:
 x86_64-w64-mingw32-gcc -c -fno-builtin -o ghosttype.o ghosttype.c
 ```
 
-Add `-O2 -Wall -Wextra -Werror` for reduced code size, standard, additional and 'treat warnings' as errors.
+Add `-O2 -Wall -Wextra -Werror` for optimization and strict warnings.
 
 No compile-time dependencies. SQLite is loaded at runtime from `C:\Windows\System32\winsqlite3.dll` (present on all Windows 10+ systems). DPAPI and AES-GCM use `crypt32.dll` and `bcrypt.dll` (also system-provided).
 
@@ -101,13 +101,13 @@ Severity levels: `critical` (AWS keys, Anthropic keys, GitHub PATs, Stripe live 
 - SQLite accessed via system-provided `winsqlite3.dll` (no DLL drop)
 - Databases copied to `%TEMP%` before opening to avoid lock contention with running applications
 - Temp files are deleted after use
-- ChatGPT decryption uses DPAPI `CryptUnprotectData` (logged as Event ID 4693 if auditing is enabled)
+- ChatGPT decryption uses DPAPI `CryptUnprotectData` plus BCrypt AES-256-GCM; neither is audited by default on Windows
 - No registry writes, no named pipes, no service creation
 - Synchronous execution: blocks the agent thread until complete (typically a few seconds)
 
 ## Detection
 
-See [DETECTION.md](DETECTION.md) for concept-level detection notes covering both this BOF and the original Python tool, with telemetry surfaces, honeytoken strategy, and known evasion paths.
+Detection notes and evasion paths: [DETECTION.md](DETECTION.md).
 
 ## Credit
 
