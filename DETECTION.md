@@ -45,7 +45,7 @@ Beyond file reads, several other Windows surfaces fire when the BOF runs:
 | Image load: `crypt32.dll`, `bcrypt.dll` | `DeviceImageLoadEvents` | Not loaded by the BOF directly. Resolved by the C2 framework's COFF loader as `LIBRARY$Function` DFR imports, which internally results in `LoadLibraryA` calls from the beacon process. Image-load events look identical to defenders. |
 | Combined load pattern | `DeviceImageLoadEvents` joined to `DeviceFileEvents` | `winsqlite3` plus `crypt32` plus `bcrypt` loaded into a process that is not a browser, IDE, or known DB tool is rare. Strong correlation signal in a short time window. |
 | Temp-file create | `DeviceFileEvents` | BOF calls `GetTempFileNameW` with prefix `gt` then `CopyFileW` to clone SQLite databases into `%TEMP%` before opening. A temp file whose contents match SQLite magic bytes (`SQLite format 3\0`) under a non-SQLite-using process is a clean indicator. |
-| DPAPI activity | ETW `Microsoft-Windows-Crypto-DPAPI` (`DPAPIDefInformationEvent` 8193 / 8194), or EDR crypt-API hooks | Not audited by default. Event `4693` covers master-key recovery (e.g., backup), not application-level `CryptUnprotectData`. Event `4695` only fires when the protected blob carries `CRYPTPROTECT_AUDIT`, which Chromium and Electron do not set, so ChatGPT decryption emits no `4695`. Treat DPAPI as a confirmation signal, not a frontline detection. |
+| DPAPI activity | ETW `Microsoft-Windows-Crypto-DPAPI` (`DPAPIDefInformationEvent` 8193 / 8194), or EDR crypt-API hooks | Off by default. `4693` is master-key recovery (backups), not `CryptUnprotectData`. `4695` requires `CRYPTPROTECT_AUDIT`, which Chromium and Electron never set. |
 
 ## Telemetry Surfaces (macOS)
 
