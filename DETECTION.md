@@ -19,27 +19,33 @@ This document does not ship production-ready rules. It enumerates the telemetry 
 
 MITRE ATT&CK mapping:
 
-- [**T1552.001**](https://attack.mitre.org/techniques/T1552/001/) — Unsecured Credentials: Credentials In Files. Primary technique for both tools; credentials live in plaintext (or DPAPI-wrapped) files that the tool reads as files.
-- [**T1005**](https://attack.mitre.org/techniques/T1005/) — Data from Local System. Covers the file-walk and bulk-read behavior across multiple AI tool stores.
-- [**T1140**](https://attack.mitre.org/techniques/T1140/) — Deobfuscate/Decode Files or Information. Applies to the BOF's ChatGPT path: DPAPI unwrap of the encrypted key followed by AES-256-GCM decryption of conversation files.
-- [**T1555**](https://attack.mitre.org/techniques/T1555/) — Credentials from Password Stores (parent technique, no subtechnique). Defensible for the ChatGPT/Electron path specifically, where the `encrypted_key` field in `Local State` is a DPAPI-protected Chromium Safe Storage key — that is a password-store-style protected secret. Not applicable to Claude Code, Cursor, or Codex paths.
+| Technique | Name | Applicability |
+|-----------|------|---------------|
+| [T1552.001](https://attack.mitre.org/techniques/T1552/001/) | Unsecured Credentials: Credentials In Files | Primary technique for both tools. Credentials live in plaintext or DPAPI-wrapped files that the tool reads as files. |
+| [T1005](https://attack.mitre.org/techniques/T1005/) | Data from Local System | Covers the file-walk and bulk-read behavior across multiple AI tool stores. |
+| [T1140](https://attack.mitre.org/techniques/T1140/) | Deobfuscate/Decode Files or Information | Applies to the BOF's ChatGPT path: DPAPI unwrap of the encrypted key, then AES-256-GCM decryption of conversation files. |
+| [T1555](https://attack.mitre.org/techniques/T1555/) | Credentials from Password Stores (parent, no subtechnique) | Defensible for the ChatGPT/Electron path only. The `encrypted_key` field in `Local State` is a DPAPI-protected Chromium Safe Storage key, a password-store-style protected secret. Not applicable to Claude Code, Cursor, or Codex paths. |
 
 ## Telemetry Surfaces (Windows)
 
-The BOF and a Windows-packaged build of the original tool both emit file-read activity that is unusual for the typical owning processes. The critical insight: legitimate readers of these files are a tiny known set, so anomaly-by-process is high signal.
+The BOF and a Windows-packaged build of the original tool both emit file-read activity that is unusual for the typical owning processes. Legitimate readers of each target path are a tiny known set, so anomaly-by-process is a high-signal detection. Tune by trusting signed publisher fields rather than process name.
 
-Legitimate readers of the target paths:
+| Target path | Legitimate readers | Common false positives |
+|-------------|--------------------|-------------------------|
+| `.claude\projects\*.jsonl` | `claude.exe` (Claude Code CLI / Node process); user's editor on explicit open | Backup agents (OneDrive sync, enterprise backup), Defender / EDR scanners, DLP agents |
+| `state.vscdb` (Cursor) | `Cursor.exe` and Cursor helper processes | Same |
+| `.codex\*.sqlite` | `codex.exe` / Node process running the Codex CLI | Same |
+| `conversations-v3-*\*.data` | `ChatGPT.exe` (Electron main / helper) | Same |
 
-- `.claude\projects\*.jsonl` — `claude.exe` (Claude Code CLI / Node process), the user's editor when they open the file
-- `state.vscdb` (Cursor) — `Cursor.exe` and Cursor helper processes
-- `.codex\*.sqlite` — `codex.exe` / Node process running the Codex CLI
-- `conversations-v3-*\*.data` — `ChatGPT.exe` (Electron main / helper)
+Beyond file reads, several other Windows surfaces fire when the BOF runs:
 
-Anything else reading these files is suspect. The detection idea is a `DeviceFileEvents` baseline that lists the allowed `InitiatingProcessFileName` per target path and surfaces all violations. False positives: backup agents (OneDrive sync, enterprise backup), Defender / EDR scanners themselves, DLP agents. Tune by trusting their signed publisher fields rather than the process name.
-
-The BOF's DLL loading pattern is also distinctive. `winsqlite3.dll` is explicitly loaded by the BOF via `LoadLibraryA` (ghosttype.c:417) and is loaded by very few processes overall. `crypt32.dll` and `bcrypt.dll` are not loaded by the BOF directly; they are resolved by the C2 framework's COFF loader as `LIBRARY$Function` Dynamic Function Resolution imports, which internally results in `LoadLibraryA` calls from the beacon process. The image-load events look the same from the defender's perspective regardless of which layer issued the call. The combination of `winsqlite3` plus `crypt32` plus `bcrypt` loaded into a process that isn't a browser, IDE, or known DB tool is rare. `DeviceImageLoadEvents` joined to `DeviceFileEvents` within a small time window yields a strong correlation signal. The BOF also calls `GetTempFileNameW` with prefix `gt` and `CopyFileW` to clone SQLite databases into `%TEMP%` before opening them — a temp-file create whose contents match SQLite magic bytes (`SQLite format 3\0`) under a non-SQLite-using process is a clean indicator.
-
-DPAPI activity is not audited by default and is not reliably captured by the Security event log. Event ID `4693` covers DPAPI master-key recovery (e.g., backup operations), not application-level `CryptUnprotectData` calls. Event ID `4695` only fires when the protected blob carries the `CRYPTPROTECT_AUDIT` flag, which Chromium and Electron do not set, so ChatGPT decryption emits no `4695` either. Practical visibility requires ETW (`Microsoft-Windows-Crypto-DPAPI` provider, events such as `DPAPIDefInformationEvent` 8193 and 8194) or an EDR that hooks the crypt APIs (Defender for Endpoint surfaces this in some advanced-hunting columns). Treat DPAPI as a confirmation-layer signal, not a frontline detection.
+| Surface | Source | Notes |
+|---------|--------|-------|
+| Image load: `winsqlite3.dll` | `DeviceImageLoadEvents` | Explicitly loaded by the BOF via `LoadLibraryA` (ghosttype.c:417). Loaded by very few processes overall, so the load itself is anomalous in most images. |
+| Image load: `crypt32.dll`, `bcrypt.dll` | `DeviceImageLoadEvents` | Not loaded by the BOF directly. Resolved by the C2 framework's COFF loader as `LIBRARY$Function` DFR imports, which internally results in `LoadLibraryA` calls from the beacon process. Image-load events look identical to defenders. |
+| Combined load pattern | `DeviceImageLoadEvents` joined to `DeviceFileEvents` | `winsqlite3` plus `crypt32` plus `bcrypt` loaded into a process that is not a browser, IDE, or known DB tool is rare. Strong correlation signal in a short time window. |
+| Temp-file create | `DeviceFileEvents` | BOF calls `GetTempFileNameW` with prefix `gt` then `CopyFileW` to clone SQLite databases into `%TEMP%` before opening. A temp file whose contents match SQLite magic bytes (`SQLite format 3\0`) under a non-SQLite-using process is a clean indicator. |
+| DPAPI activity | ETW `Microsoft-Windows-Crypto-DPAPI` (`DPAPIDefInformationEvent` 8193 / 8194), or EDR crypt-API hooks | Not audited by default. Event `4693` covers master-key recovery (e.g., backup), not application-level `CryptUnprotectData`. Event `4695` only fires when the protected blob carries `CRYPTPROTECT_AUDIT`, which Chromium and Electron do not set, so ChatGPT decryption emits no `4695`. Treat DPAPI as a confirmation signal, not a frontline detection. |
 
 ## Telemetry Surfaces (macOS)
 
